@@ -68,7 +68,7 @@ function CarregaHashes {
     $h = Join-Path $cache 'hashes.txt'
     Remove-Item $h -ErrorAction SilentlyContinue
     try { Invoke-WebRequest -Uri "$raw/hashes.txt" -OutFile $h -UseBasicParsing -TimeoutSec 60 } catch { Aviso 'o repositorio nao publica hashes.txt: vou so mostrar os hashes, sem conferir.'; return }
-    foreach ($l in Get-Content $h) { if ($l -match '^\s*([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$') { $script:hashes[$Matches[2]] = $Matches[1].ToUpper() } }
+    foreach ($l in Get-Content $h) { if ($l -match '^\s*([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$') { $hashes[$Matches[2]] = $Matches[1].ToUpper() } }
 }
 function ConfereHash($arquivo) {
     $nome = Split-Path $arquivo -Leaf
