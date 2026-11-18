@@ -20,6 +20,11 @@
   Depois de preparar, chama o INSTALAR.bat. So funciona numa sessao com tela (nao em PowerShell remoto sem desktop).
 .PARAMETER Forcar
   Baixa de novo mesmo que o zip ja esteja no cache.
+.PARAMETER SoAgente
+  Atualiza SO o Agente SIGA (equipamentos que ja tem o agente): baixa so o pacote (5 MB), troca os arquivos e reabre o agente na sessao do usuario.
+  A configuracao e o cadastro (token) ficam como estao, entao nao pede login nem pareamento de novo. Funciona tambem pelo PowerShell remoto (sem tela).
+.PARAMETER DirAgente
+  So para teste: instala o agente nesta pasta em vez de em Program Files.
 #>
 param(
     [string]$Repo = 'crocha89/Atualiza-o1711',
@@ -29,6 +34,8 @@ param(
     [switch]$SemVerificar,
     [switch]$Instalar,
     [switch]$Forcar,
+    [switch]$SoAgente,
+    [string]$DirAgente = '',
     # repassados ao assistente (Instalar-Equipamento.ps1) quando -Instalar:
     [string]$Modelo = '',
     [string]$Oncoprod = '',
@@ -41,6 +48,9 @@ param(
     [switch]$SemPerguntar
 )
 $ErrorActionPreference = 'Stop'
+# PCs com a execucao de scripts desabilitada (padrao do Windows cliente): libera so ESTA janela do PowerShell, para os .ps1 que ele baixa e chama
+# (Instalar.ps1 do agente, o assistente...). Nao mexe na configuracao do sistema e vale ate fechar a janela.
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch {}
 $ProgressPreference = 'SilentlyContinue'     # a barra de progresso do PowerShell 5.1 deixa o download umas 8 vezes mais lento
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 $raw = "https://raw.githubusercontent.com/$Repo/$Ramo"
@@ -90,6 +100,46 @@ $zipPacote = Join-Path $cache 'instaladores.zip'
 Baixa "$raw/instaladores.zip" $zipPacote
 if (-not (ConfereHash $zipPacote)) { throw 'instaladores.zip nao confere com o hash publicado. Nada foi instalado.' }
 Ok ('instaladores.zip: {0:N1} MB' -f ((Get-Item $zipPacote).Length / 1MB))
+
+# ---------------------------------------------------------------- so o agente (equipamento que ja tem o agente)
+if ($SoAgente) {
+    Passo 2 'Atualizar so o Agente SIGA (configuracao e cadastro ficam como estao)'
+    $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $admin -and -not $DirAgente) { throw 'Abra o PowerShell como Administrador (o agente fica em Program Files).' }
+    $tmp = Join-Path $Destino 'agente'
+    if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
+    Expand-Archive -Path $zipPacote -DestinationPath $tmp -Force
+    $pac = Join-Path $tmp 'Agente'
+    if (-not (Test-Path (Join-Path $pac 'Instalar.ps1')) -or -not (Test-Path (Join-Path $pac 'AgenteSiga.exe'))) { throw 'O pacote veio sem o Agente (Instalar.ps1 e AgenteSiga.exe).' }
+    $alvo = if ($DirAgente) { $DirAgente } else { Join-Path $env:ProgramFiles 'Bionexo\AgenteSiga' }
+    $exeAlvo = Join-Path $alvo 'AgenteSiga.exe'
+    $antes = if (Test-Path $exeAlvo) { (Get-FileHash $exeAlvo -Algorithm SHA256).Hash } else { '' }
+    $iargs = @{ NaoIniciar = $true }
+    if ($DirAgente) { $iargs.Dir = $DirAgente }
+    & (Join-Path $pac 'Instalar.ps1') @iargs | Out-Host       # encerra o agente em execucao, troca os arquivos, nao mexe em ProgramData (agent.json, token, logs)
+    $novo = (Get-FileHash (Join-Path $pac 'AgenteSiga.exe') -Algorithm SHA256).Hash
+    if ((Get-FileHash $exeAlvo -Algorithm SHA256).Hash -ne $novo) { throw "O AgenteSiga.exe instalado nao confere com o do pacote ($exeAlvo)." }
+    if ($antes -eq $novo) { Ok 'o agente ja era esta versao (reinstalado do mesmo jeito).' } else { Ok 'agente atualizado.' }
+    Write-Host "    SHA256 do AgenteSiga.exe instalado: $novo"
+
+    # reabre o agente na sessao do usuario (a bandeja precisa dela). Sem tela (sessao 0), usa uma tarefa unica no usuario que esta logado.
+    if ($DirAgente) { Write-Host '    (-DirAgente: nao reabro o agente.)' }
+    elseif ((Get-Process -Id $PID).SessionId -ne 0) { Start-Process explorer.exe "`"$exeAlvo`""; Ok 'agente aberto.' }
+    else {
+        $usuario = (Get-CimInstance Win32_ComputerSystem).UserName
+        if (-not $usuario) { Aviso 'ninguem logado no Windows: o agente abre no proximo logon (iniciar com o Windows).' }
+        else {
+            $tn = 'AgenteSigaReabrir'
+            & schtasks.exe /Create /TN $tn /TR "explorer.exe `"$exeAlvo`"" /SC ONCE /ST 23:59 /RU $usuario /IT /RL LIMITED /F | Out-Null
+            & schtasks.exe /Run /TN $tn | Out-Null
+            Start-Sleep -Seconds 5
+            & schtasks.exe /Delete /TN $tn /F | Out-Null
+            if (Get-Process -Name AgenteSiga -ErrorAction SilentlyContinue) { Ok "agente aberto na sessao de $usuario." } else { Aviso "nao consegui abrir o agente na sessao de $usuario; ele abre no proximo logon." }
+        }
+    }
+    try { Stop-Transcript | Out-Null } catch {}
+    return
+}
 
 # ---------------------------------------------------------------- 2) Cabinet
 Passo 2 'Cabinet (release)'
