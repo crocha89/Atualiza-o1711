@@ -51,7 +51,8 @@ $ErrorActionPreference = 'Stop'
 # PCs com a execucao de scripts desabilitada (padrao do Windows cliente): libera so ESTA janela do PowerShell, para os .ps1 que ele baixa e chama
 # (Instalar.ps1 do agente, o assistente...). Nao mexe na configuracao do sistema e vale ate fechar a janela.
 try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction Stop } catch {}
-$ProgressPreference = 'SilentlyContinue'     # a barra de progresso do PowerShell 5.1 deixa o download umas 8 vezes mais lento
+$global:ProgressPreference = 'SilentlyContinue'     # a barra de progresso do PowerShell 5.1 deixa o download umas 8 vezes mais lento (e quebra no console do LogMeIn)
+$ProgressPreference = 'SilentlyContinue'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
 $raw = "https://raw.githubusercontent.com/$Repo/$Ramo"
 $cache = Join-Path $Destino 'cache'
@@ -70,6 +71,25 @@ function Baixa($url, $saida) {
         catch { Aviso "tentativa $i falhou: $($_.Exception.Message)"; Start-Sleep -Seconds (5 * $i) }
     }
     throw "Nao consegui baixar $url"
+}
+
+# Extrai um zip sem o Expand-Archive: ele desenha barra de progresso e isso da erro ("Acesso negado ao ler o buffer do console") no PowerShell de fundo do LogMeIn.
+function Extrai($zip, $destino) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    New-Item -ItemType Directory -Force $destino | Out-Null
+    $raizDest = [IO.Path]::GetFullPath($destino).TrimEnd('\') + '\'
+    $z = [IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($e in $z.Entries) {
+            $rel = $e.FullName.Replace('/', '\')
+            $alvo = [IO.Path]::GetFullPath((Join-Path $destino $rel))
+            if (-not $alvo.StartsWith($raizDest, [StringComparison]::OrdinalIgnoreCase)) { throw "Entrada de zip fora da pasta de destino: $($e.FullName)" }
+            if ($rel.EndsWith('\')) { New-Item -ItemType Directory -Force $alvo | Out-Null; continue }
+            New-Item -ItemType Directory -Force (Split-Path $alvo -Parent) | Out-Null
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $alvo, $true)
+        }
+    }
+    finally { $z.Dispose() }
 }
 
 # hashes.txt (opcional): uma linha por arquivo, "SHA256  nome". Garante que o que chegou e o que foi testado.
@@ -108,7 +128,7 @@ if ($SoAgente) {
     if (-not $admin -and -not $DirAgente) { throw 'Abra o PowerShell como Administrador (o agente fica em Program Files).' }
     $tmp = Join-Path $Destino 'agente'
     if (Test-Path $tmp) { Remove-Item $tmp -Recurse -Force }
-    Expand-Archive -Path $zipPacote -DestinationPath $tmp -Force
+    Extrai $zipPacote $tmp
     $pac = Join-Path $tmp 'Agente'
     if (-not (Test-Path (Join-Path $pac 'Instalar.ps1')) -or -not (Test-Path (Join-Path $pac 'AgenteSiga.exe'))) { throw 'O pacote veio sem o Agente (Instalar.ps1 e AgenteSiga.exe).' }
     $alvo = if ($DirAgente) { $DirAgente } else { Join-Path $env:ProgramFiles 'Bionexo\AgenteSiga' }
@@ -160,8 +180,8 @@ Ok ('{0}: {1:N1} MB' -f (Split-Path $zipCabinet -Leaf), ((Get-Item $zipCabinet).
 # ---------------------------------------------------------------- 3) extrair
 Passo 3 "Extrair para $inst"
 if (Test-Path $inst) { Remove-Item $inst -Recurse -Force }
-Expand-Archive -Path $zipPacote -DestinationPath $inst -Force
-Expand-Archive -Path $zipCabinet -DestinationPath $inst -Force
+Extrai $zipPacote $inst
+Extrai $zipCabinet $inst
 $falta = @('INSTALAR.bat', 'Instalar-Equipamento.ps1', 'Agente\AgenteSiga.exe', 'EquipmentStatus\EquipmentStatusSetup.exe') | Where-Object { -not (Test-Path (Join-Path $inst $_)) }
 if ($falta) { throw "O pacote veio incompleto, falta: $($falta -join ', ')" }
 $cab = @(Get-ChildItem $inst -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'Gtt.HealthTrack.Cabinet.exe') })
